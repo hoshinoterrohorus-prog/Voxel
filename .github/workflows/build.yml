@@ -1,46 +1,74 @@
 name: Build APK
 on:
+  workflow_dispatch:
   push:
     branches: [main, master]
-  workflow_dispatch:
+
+env:
+  GODOT_VERSION: 4.4.1
+
 jobs:
-  build:
+  apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
+
+      - name: Ekstrak project dari zip
+        run: |
+          Z=$(ls *Hoshi*.zip | head -n1)
+          echo "Zip: $Z"
+          mkdir -p work && unzip -q "$Z" -d work
+          P=$(dirname "$(find work -name project.godot | head -n1)")
+          echo "Project: $P"
+          echo "PROJ=$P" >> $GITHUB_ENV
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-      - name: Install
-        run: npm install
-      - name: Buat proyek Android
-        run: npx cap add android
-      - name: Ikon aplikasi
-        run: npx @capacitor/assets generate --android || true
-      - name: Layar penuh + landscape
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+
+      - name: Install SDK packages
         run: |
-          python3 - <<'PY'
-          import re
-          m='android/app/src/main/AndroidManifest.xml'
-          s=open(m).read().replace('<activity','<activity android:screenOrientation="sensorLandscape"',1)
-          open(m,'w').write(s)
-          p='android/app/src/main/res/values/styles.xml'
-          s=open(p).read()
-          s=re.sub(r'(<style name="AppTheme.NoActionBar"[^>]*>)',r'\1\n        <item name="android:windowFullscreen">true</item>',s,1)
-          open(p,'w').write(s)
-          PY
-      - name: Sync
-        run: npx cap sync android
-      - name: Build APK
-        working-directory: android
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "build-tools;35.0.1" "platforms;android-35" "cmdline-tools;latest" "cmake;3.10.2.4988404" "ndk;28.1.13356709"
+
+      - name: Install Godot + export templates
         run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug
+          B=https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable
+          wget -q $B/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip -O g.zip
+          wget -q $B/Godot_v${GODOT_VERSION}-stable_export_templates.tpz -O t.zip
+          unzip -q g.zip && sudo mv Godot_v${GODOT_VERSION}-stable_linux.x86_64 /usr/local/bin/godot
+          mkdir -p ~/.local/share/godot/export_templates
+          unzip -q t.zip -d tpl && mv tpl/templates ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+
+      - name: Debug keystore + editor settings
+        run: |
+          keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android -keystore $PWD/debug.keystore -storepass android -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
+          mkdir -p ~/.config/godot
+          {
+            echo '[gd_resource type="EditorSettings" format=3]'
+            echo '[resource]'
+            echo "export/android/java_sdk_path = \"$JAVA_HOME\""
+            echo "export/android/android_sdk_path = \"$ANDROID_HOME\""
+            echo "export/android/debug_keystore = \"$PWD/debug.keystore\""
+            echo 'export/android/debug_keystore_user = "androiddebugkey"'
+            echo 'export/android/debug_keystore_pass = "android"'
+          } > ~/.config/godot/editor_settings-4.4.tres
+
+      - name: Export APK
+        run: |
+          cd "$PROJ"
+          mkdir -p build
+          godot --headless --import || true
+          godot --headless --export-debug "Android" build/HoshiNoSato.apk
+          ls -la build
+
       - uses: actions/upload-artifact@v4
         with:
-          name: Machi-Iro-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: HoshiNoSato-apk
+          path: ${{ env.PROJ }}/build/HoshiNoSato.apk
